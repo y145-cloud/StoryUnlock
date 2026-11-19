@@ -495,7 +495,9 @@ function renderStatus() {
 
     $('#su-floor-label').text(`楼层：${currentCtx ? currentCtx.floor : 0}`);
     $('#su-rule-count').text(currentRules.length);
-    $('#su-enabled').prop('checked', settings.enabled);
+    const enabled = Boolean(settings.enabled);
+    $('#su-enabled').prop('checked', enabled);
+    $('#su-enabled-label').text(enabled ? '已启用' : '已停用');
     $('#su-new').prop('disabled', !currentRoleKey);
 
     $('#su-position').val(settings.position);
@@ -1282,7 +1284,14 @@ function bindPanelEvents() {
         settings.enabled = Boolean(this.checked);
         saveSettings();
         if (!settings.enabled) applyPrompt('');
+        $('#su-enabled-label').text(this.checked ? '已启用' : '已停用');
         renderRules();
+    });
+
+    $('#su-toggle').on('click', function () {
+        const $panel = $('#story-unlock-settings');
+        const collapsed = $panel.toggleClass('su-collapsed').hasClass('su-collapsed');
+        $(this).attr('aria-expanded', String(!collapsed));
     });
 
     $('#su-new').on('click', () => openEditor(null));

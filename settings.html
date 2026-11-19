@@ -1,20 +1,29 @@
 <div id="story-unlock-settings" class="su-panel">
     <div class="su-header">
-        <div class="su-header-text">
-            <div class="su-title">
-                <i class="fa-solid fa-lock-open"></i>
-                剧情解锁
-                <span class="su-version">v0.1.0</span>
-            </div>
-            <div class="su-subtitle">
-                MVU 剧情变量满足条件后，才把预设内容注入给 AI。规则随角色卡保存，解锁状态随聊天保存，互不串味。
-            </div>
-        </div>
+        <button type="button" class="su-header-toggle" id="su-toggle" aria-expanded="true"
+                aria-controls="su-body" title="点击展开 / 收起设置">
+            <span class="su-header-text">
+                <span class="su-title">
+                    <i class="fa-solid fa-lock-open"></i>
+                    剧情解锁
+                    <span class="su-version">v0.1.1</span>
+                </span>
+                <span class="su-subtitle">
+                    MVU 剧情变量满足条件后，才把预设内容注入给 AI。规则随角色卡保存，解锁状态随聊天保存，互不串味。
+                </span>
+            </span>
+            <span class="su-chevron" aria-hidden="true"></span>
+        </button>
         <label class="su-switch" title="总开关">
             <input type="checkbox" id="su-enabled">
-            <span>启用</span>
+            <span class="su-switch-track" aria-hidden="true">
+                <span class="su-switch-thumb"></span>
+            </span>
+            <span id="su-enabled-label">启用</span>
         </label>
     </div>
+
+    <div id="su-body" class="su-body">
 
     <div class="su-toolbar">
         <button id="su-new" class="menu_button su-primary">
@@ -97,6 +106,7 @@
 
     <div class="su-footer">
         规则保存在扩展设置里（同一角色卡共用）；解锁状态保存在当前聊天里。不会写入世界书。
+    </div>
     </div>
 </div>
 
