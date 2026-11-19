@@ -1,0 +1,10 @@
+{
+    "name": "story-unlock",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "description": "剧情解锁 Story Unlock：按 MVU 变量条件触发提示词注入的 SillyTavern / TauriTavern 扩展",
+    "scripts": {
+        "test": "node --test test/engine.test.mjs"
+    }
+}

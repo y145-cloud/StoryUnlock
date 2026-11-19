@@ -1,0 +1,229 @@
+<div id="story-unlock-settings" class="su-panel">
+    <div class="su-header">
+        <div class="su-header-text">
+            <div class="su-title">
+                <i class="fa-solid fa-lock-open"></i>
+                剧情解锁
+                <span class="su-version">v0.1.0</span>
+            </div>
+            <div class="su-subtitle">
+                MVU 剧情变量满足条件后，才把预设内容注入给 AI。规则随角色卡保存，解锁状态随聊天保存，互不串味。
+            </div>
+        </div>
+        <label class="su-switch" title="总开关">
+            <input type="checkbox" id="su-enabled">
+            <span>启用</span>
+        </label>
+    </div>
+
+    <div class="su-toolbar">
+        <button id="su-new" class="menu_button su-primary">
+            <i class="fa-solid fa-plus"></i> 新建解锁项
+        </button>
+        <button id="su-refresh" class="menu_button" title="重新读取当前聊天的 MVU 变量">
+            <i class="fa-solid fa-rotate"></i> 刷新变量
+        </button>
+        <button id="su-preview" class="menu_button" title="按当前状态计算这一次会注入什么">
+            <i class="fa-solid fa-eye"></i> 预览注入
+        </button>
+        <button id="su-import" class="menu_button">
+            <i class="fa-solid fa-file-import"></i> 导入
+        </button>
+        <button id="su-export" class="menu_button">
+            <i class="fa-solid fa-file-export"></i> 导出
+        </button>
+        <button id="su-reset-chat" class="menu_button su-danger" title="只重置当前聊天的解锁状态，不动规则">
+            <i class="fa-solid fa-arrow-rotate-left"></i> 重置本聊天
+        </button>
+    </div>
+
+    <div class="su-statusbar">
+        <span id="su-chat-label" class="su-status-item">当前聊天：—</span>
+        <span id="su-mvu-state" class="su-status-item su-muted">MVU：未检测</span>
+        <span id="su-floor-label" class="su-status-item su-muted">楼层：0</span>
+    </div>
+
+    <details class="su-vars" id="su-inject-box">
+        <summary>注入设置</summary>
+        <div class="su-inject-grid">
+            <label class="su-field">
+                <span>注入位置</span>
+                <select id="su-position">
+                    <option value="in_chat">聊天内（IN_CHAT）</option>
+                    <option value="in_prompt">提示词内（IN_PROMPT）</option>
+                    <option value="before_prompt">提示词前（BEFORE_PROMPT）</option>
+                </select>
+            </label>
+            <label class="su-field">
+                <span>深度（仅 IN_CHAT）</span>
+                <input id="su-depth" type="number" min="0" max="10000" step="1" value="4">
+            </label>
+            <label class="su-field">
+                <span>注入角色</span>
+                <select id="su-role">
+                    <option value="system">System</option>
+                    <option value="user">User</option>
+                    <option value="assistant">Assistant</option>
+                </select>
+            </label>
+        </div>
+        <label class="su-check">
+            <input type="checkbox" id="su-wrapper" checked>
+            <span>用 &lt;story_unlock&gt; 标签包裹（推荐）</span>
+        </label>
+        <label class="su-field">
+            <span>包裹内标题</span>
+            <input id="su-header" type="text" maxlength="160">
+        </label>
+    </details>
+
+    <details class="su-vars" id="su-vars-box">
+        <summary>当前 MVU 变量（点击一行填入条件路径）</summary>
+        <div class="su-vars-tools">
+            <input id="su-var-filter" type="text" placeholder="过滤路径或值…">
+            <button id="su-copy-vars" class="menu_button" title="复制为 JSON">复制全部</button>
+        </div>
+        <div id="su-vars-list" class="su-vars-list"></div>
+    </details>
+
+    <div class="su-rules-head">
+        <span><i class="fa-solid fa-list-check"></i> 解锁项</span>
+        <span id="su-rule-count" class="su-badge">0</span>
+    </div>
+    <div id="su-rules" class="su-rules"></div>
+    <div id="su-empty" class="su-empty" style="display:none;">
+        还没有解锁项。点击「新建解锁项」，设置触发条件和要注入的内容。
+    </div>
+
+    <div class="su-footer">
+        规则保存在扩展设置里（同一角色卡共用）；解锁状态保存在当前聊天里。不会写入世界书。
+    </div>
+</div>
+
+<div id="su-editor" class="su-modal" style="display:none;">
+    <div class="su-modal-backdrop" data-su-close="1"></div>
+    <div class="su-dialog" role="dialog" aria-modal="true" aria-label="编辑解锁项">
+        <div class="su-dialog-head">
+            <div>
+                <div class="su-dialog-title" id="su-editor-title">新建解锁项</div>
+                <div class="su-dialog-sub">条件满足后才会注入；支持 MVU 路径、运算符和高级表达式。</div>
+            </div>
+            <button class="menu_button" id="su-editor-close" title="关闭">✕</button>
+        </div>
+
+        <div class="su-tabs">
+            <button class="su-tab is-active" data-tab="basic">基本</button>
+            <button class="su-tab" data-tab="conditions">条件</button>
+            <button class="su-tab" data-tab="advanced">高级</button>
+        </div>
+
+        <div class="su-tab-panel is-active" data-panel="basic">
+            <div class="su-grid-2">
+                <label class="su-field">
+                    <span>名称</span>
+                    <input id="su-title" type="text" maxlength="60" placeholder="例如：恢复失忆前的记忆">
+                </label>
+                <label class="su-field">
+                    <span>满足方式</span>
+                    <select id="su-match">
+                        <option value="all">全部条件满足（AND）</option>
+                        <option value="any">任意条件满足（OR）</option>
+                    </select>
+                </label>
+            </div>
+
+            <div class="su-grid-3">
+                <label class="su-field">
+                    <span>注入方式</span>
+                    <select id="su-mode">
+                        <option value="sticky">解锁后一直注入</option>
+                        <option value="once">只注入一次</option>
+                        <option value="window">解锁后限时注入</option>
+                        <option value="while">条件满足期间注入</option>
+                    </select>
+                </label>
+                <label class="su-field">
+                    <span>窗口楼层数</span>
+                    <input id="su-turns" type="number" min="1" max="1000" step="1" value="3">
+                </label>
+                <label class="su-field">
+                    <span>排序（小的在前）</span>
+                    <input id="su-order" type="number" step="1" value="0">
+                </label>
+            </div>
+
+            <label class="su-field">
+                <span>解锁后注入的内容</span>
+                <textarea id="su-content" rows="7" placeholder="例如：你其实记得失忆前的事：你曾是……&#10;&#10;这段内容只有在条件满足后才会发给 AI。"></textarea>
+            </label>
+
+            <label class="su-check">
+                <input type="checkbox" id="su-rule-enabled" checked>
+                <span>启用这条解锁项</span>
+            </label>
+        </div>
+
+        <div class="su-tab-panel" data-panel="conditions">
+            <div id="su-conditions" class="su-conditions"></div>
+            <button id="su-add-condition" class="menu_button">
+                <i class="fa-solid fa-plus"></i> 添加条件
+            </button>
+            <div class="su-hint">
+                路径从 MVU 的 <code>stat_data</code> 开始，例如 <code>角色.络络.好感度</code> 或
+                <code>事件.失忆真相</code>。数字、布尔会自动比较；也支持 <code>$floor</code> 当前楼层。
+            </div>
+        </div>
+
+        <div class="su-tab-panel" data-panel="advanced">
+            <label class="su-field">
+                <span>高级表达式（可选，和上面的条件是 AND）</span>
+                <textarea id="su-expr" rows="3" placeholder="例如：get('角色.络络.好感度') >= 60 && get('事件.失忆真相') === true"></textarea>
+            </label>
+            <div class="su-hint">
+                可用：<code>stat_data</code>、<code>get(path)</code>、<code>value(path)</code>、
+                <code>floor</code>、<code>msgCount</code>、<code>lastMessage</code>、
+                <code>lastUserMessage</code>、<code>chatName</code>、<code>chat</code>。
+            </div>
+            <label class="su-field">
+                <span>触发说明（备注，不会注入）</span>
+                <input id="su-note" type="text" maxlength="200" placeholder="给自己看的备注">
+            </label>
+            <div class="su-summary-box">
+                <div class="su-summary-label">条件摘要</div>
+                <div id="su-condition-summary">—</div>
+            </div>
+        </div>
+
+        <div id="su-test-result" class="su-test-result" style="display:none;"></div>
+
+        <div class="su-dialog-foot">
+            <button id="su-editor-delete" class="menu_button su-danger">删除</button>
+            <span class="su-spacer"></span>
+            <button id="su-editor-test" class="menu_button">测试条件</button>
+            <button id="su-editor-cancel" class="menu_button">取消</button>
+            <button id="su-editor-save" class="menu_button su-primary">保存</button>
+        </div>
+    </div>
+</div>
+
+<div id="su-text-modal" class="su-modal" style="display:none;">
+    <div class="su-modal-backdrop" data-su-text-close="1"></div>
+    <div class="su-dialog" role="dialog" aria-modal="true" aria-label="剧情解锁文本">
+        <div class="su-dialog-head">
+            <div>
+                <div class="su-dialog-title" id="su-text-title">预览</div>
+                <div class="su-dialog-sub" id="su-text-sub">只读</div>
+            </div>
+            <button class="menu_button" id="su-text-close" title="关闭">✕</button>
+        </div>
+        <textarea id="su-text-body" rows="14" readonly></textarea>
+        <div class="su-dialog-foot">
+            <span class="su-spacer"></span>
+            <button id="su-text-copy" class="menu_button">复制</button>
+            <button id="su-text-ok" class="menu_button su-primary">关闭</button>
+        </div>
+    </div>
+</div>
+
+<datalist id="su-path-list"></datalist>
+<input type="file" id="su-import-file" accept="application/json,.json" style="display:none;">
