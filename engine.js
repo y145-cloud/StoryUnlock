@@ -564,6 +564,33 @@ export function evaluateRule(rule, ctx = {}) {
 /* 规则与状态                                                         */
 /* ================================================================== */
 
+export function normalizeVariableDef(def = {}) {
+    const path = String(def.path ?? '').trim();
+    const type = ['boolean', 'number', 'string', 'list'].includes(def.type) ? def.type : 'boolean';
+    let initial = def.initial;
+    if (initial === undefined || initial === null || initial === '') {
+        initial = type === 'number' ? 0 : type === 'list' ? [] : type === 'string' ? '' : false;
+    }
+    return {
+        path,
+        type,
+        initial,
+        description: String(def.description ?? '').trim(),
+    };
+}
+
+export function normalizeVariables(variables) {
+    const seen = new Set();
+    const out = [];
+    for (const item of Array.isArray(variables) ? variables : []) {
+        const normalized = normalizeVariableDef(item);
+        if (!normalized.path || seen.has(normalized.path)) continue;
+        seen.add(normalized.path);
+        out.push(normalized);
+    }
+    return out;
+}
+
 export function createRule(input = {}) {
     const conditions = (Array.isArray(input.conditions) ? input.conditions : [])
         .map(normalizeCondition)
@@ -573,6 +600,9 @@ export function createRule(input = {}) {
     const mode = MODES.includes(input.mode) ? input.mode : 'sticky';
     const order = Number(input.order);
     const turns = Number(input.turns);
+    const parsedAt = input.parsedAt === null || input.parsedAt === undefined || input.parsedAt === ''
+        ? NaN
+        : Number(input.parsedAt);
 
     return {
         id: String(input.id || newRuleId()),
@@ -586,6 +616,10 @@ export function createRule(input = {}) {
         mode,
         turns: Number.isFinite(turns) ? Math.max(1, Math.min(1000, Math.floor(turns))) : 3,
         note: String(input.note ?? ''),
+        nlCondition: String(input.nlCondition ?? '').trim(),
+        variables: normalizeVariables(input.variables),
+        parseSource: ['ai', 'auto', 'manual'].includes(input.parseSource) ? input.parseSource : '',
+        parsedAt: Number.isFinite(parsedAt) ? parsedAt : null,
     };
 }
 
@@ -1031,4 +1065,50 @@ export function conditionSummary(rule) {
 
     const expr = String(rule.expr || '').trim() ? ' + 高级表达式' : '';
     return `${head}：${pieces.join('；') || '—'}${expr}`;
+}
+
+const VARIABLE_TYPE_LABELS = {
+    boolean: 'boolean',
+    number: 'number',
+    string: 'string',
+    list: 'list',
+};
+
+/**
+ * 生成给主模型的变量维护说明。
+ *
+ * 扩展不会直接改 MVU 数据，也不会写世界书；它只告诉模型这些变量应该存在，
+ * 由模型在正常的 MVU 变量更新中创建/维护。没有变量定义时返回空字符串。
+ */
+export function buildVariablePrompt(rules = []) {
+    const lines = [];
+    const seen = new Set();
+
+    for (const rule of Array.isArray(rules) ? rules : []) {
+        if (!rule || rule.enabled === false) continue;
+        for (const variable of normalizeVariables(rule.variables)) {
+            if (seen.has(variable.path)) continue;
+            seen.add(variable.path);
+            const description = variable.description
+                || rule.nlCondition
+                || '剧情达到该解锁项的条件时更新';
+            lines.push(
+                `- ${variable.path}（${VARIABLE_TYPE_LABELS[variable.type] || 'boolean'}，初始值 ${formatValue(variable.initial, 40)}）：${description}`,
+            );
+            if (lines.length >= 24) break;
+        }
+        if (lines.length >= 24) break;
+    }
+
+    if (!lines.length) return '';
+
+    const text = [
+        '<story_unlock_variables>',
+        '以下变量用于判断剧情解锁条件（可能是已有变量，也可能是本次新增）。',
+        '请用当前 MVU 的变量更新格式维护：已有变量按说明更新；不存在的变量再新增并按给定值初始化。条件未满足前不要提前改成满足值。',
+        ...lines,
+        '</story_unlock_variables>',
+    ].join('\n');
+
+    return text.length > 12000 ? `${text.slice(0, 11990)}\n…\n</story_unlock_variables>` : text;
 }

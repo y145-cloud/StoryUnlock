@@ -27,6 +27,7 @@ import {
 import {
     OPERATORS,
     applyAutoUnlocks,
+    buildVariablePrompt,
     conditionSummary,
     createRule,
     describeRule,
@@ -41,6 +42,7 @@ import {
     newRuleId,
     normalizeRules,
     normalizeState,
+    normalizeVariables,
     opLabel,
     planInjection,
     resolvePath,
@@ -88,7 +90,11 @@ let currentMvu = { available: false, source: 'message', label: '未检测', erro
 let varsRows = [];
 let editingRuleId = null;
 let editorConditions = [];
+let editingVariables = [];
+let editingParseSource = '';
+let editingNlParsed = '';
 let lastPathField = null;
+let savingRule = false;
 
 /* ================================================================== */
 /* 设置与角色                                                         */
@@ -406,6 +412,8 @@ function onGenerationAfterCommands(_eventType, _options, dryRun) {
             wrapper: settings.wrapper,
             header: settings.header,
         });
+        const variablePrompt = buildVariablePrompt(rules);
+        const promptText = [variablePrompt, plan.text].filter(Boolean).join('\n\n');
 
         const changed = plan.text !== '' || plan.details.some((detail) => detail.unlockedNow);
         if (changed && ctxData.ctx.chatMetadata) {
@@ -417,7 +425,7 @@ function onGenerationAfterCommands(_eventType, _options, dryRun) {
             }
         }
 
-        applyPrompt(plan.text);
+        applyPrompt(promptText);
 
         currentRoleKey = roleKey;
         currentRules = rules;
@@ -607,7 +615,9 @@ function renderRules(ctxData = currentCtx) {
 
         $head.append($title, $actions);
 
-        const $meta = $('<div class="su-rule-meta">').text(conditionSummary(rule));
+        const $meta = $('<div class="su-rule-meta">').text(
+            rule.nlCondition ? `条件：${rule.nlCondition}` : conditionSummary(rule),
+        );
         const $content = $('<div class="su-rule-content">').text(String(rule.content || '').trim() || '（注入内容为空）');
         const $status = $('<div class="su-rule-status">')
             .append($('<span class="su-dot">'))
@@ -742,8 +752,225 @@ function readEditorFields() {
         content: String($('#su-content').val() || ''),
         expr: String($('#su-expr').val() || '').trim(),
         note: String($('#su-note').val() || '').trim(),
+        nlCondition: String($('#su-nl-condition').val() || '').trim(),
         enabled: $('#su-rule-enabled').prop('checked') !== false,
     };
+}
+
+function getQuietPromptGenerator() {
+    const ctx = getContextSafe();
+    if (ctx && typeof ctx.generateQuietPrompt === 'function') {
+        return (options) => ctx.generateQuietPrompt(options);
+    }
+    if (typeof globalThis.generateQuietPrompt === 'function') {
+        return (options) => globalThis.generateQuietPrompt(options);
+    }
+    return null;
+}
+
+function withTimeout(promise, ms, message) {
+    let timer = null;
+    const timeout = new Promise((_resolve, reject) => {
+        timer = globalThis.setTimeout(() => reject(new Error(message)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => {
+        if (timer) globalThis.clearTimeout(timer);
+    });
+}
+
+function extractJsonObject(raw) {
+    const text = String(raw ?? '').trim()
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/```$/i, '')
+        .trim();
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start < 0 || end <= start) throw new Error('AI 没有返回 JSON 对象');
+    return JSON.parse(text.slice(start, end + 1));
+}
+
+function makeFallbackParse(ruleId, nlCondition) {
+    const path = `剧情解锁.${String(ruleId || newRuleId()).replace(/[^A-Za-z0-9_]/g, "_")}`;
+    return {
+        variables: [{
+            path,
+            type: 'boolean',
+            initial: false,
+            description: String(nlCondition || '').trim() || '当解锁条件达成时设为 true',
+        }],
+        conditions: [{ path, op: '==', value: 'true' }],
+        match: 'all',
+        explain: '没有调用 AI 或 AI 解析失败，已自动创建一个布尔变量。',
+        source: 'auto',
+    };
+}
+
+function buildParsePrompt(fields, ctxData) {
+    const rows = flattenVariables(ctxData.stat_data, { maxEntries: 100 })
+        .map((row) => `- ${row.path} = ${formatValue(row.value, 80)}`);
+    const variablesText = rows.length ? rows.join('\n') : '（当前聊天还没有 MVU 变量）';
+
+    return [
+        '你在为一个 SillyTavern 的 MVU 变量扩展设计“剧情解锁”条件。',
+        '请把用户写的自然语言解锁条件，转换成可以被程序判断的 MVU 变量和条件。',
+        '',
+        '当前聊天已有的 MVU 变量（路径 = 当前值）：',
+        variablesText,
+        '',
+        '用户填写的解锁项名称：',
+        fields.title || '（未命名）',
+        '',
+        '用户填写的自然语言解锁条件：',
+        fields.nlCondition,
+        '',
+        '解锁后要注入的内容（仅供参考，不需要复述）：',
+        String(fields.content || '').slice(0, 500) || '（无）',
+        '',
+        '要求：',
+        '1. 优先复用上面已经存在的变量。只有确实没有合适变量时，才新建变量。',
+        '2. 新建变量的路径放在“剧情解锁.”下面，例如 剧情解锁.承认失忆。不要和已有路径冲突。',
+        '3. 变量要能在正常剧情推进中被 MVU 维护。布尔变量用 true/false；数值用数字；文本用字符串。',
+        '4. variables 里的 description 要写清楚“什么剧情发生后把它改成什么”，让模型每轮知道怎么更新。',
+        '5. conditions 只写 1-4 条最关键的判断；op 只能是 >= > <= < == != contains starts_with ends_with exists not_exists in。',
+        '6. 只输出一个 JSON 对象，不要 markdown 代码块，不要解释文字。',
+        '',
+        'JSON 格式：',
+        '{"variables":[{"path":"剧情解锁.示例","type":"boolean","initial":false,"description":"当 user 在钟楼承认恢复记忆后设为 true"}],"conditions":[{"path":"剧情解锁.示例","op":"==","value":"true"}],"match":"all","explain":"一句话说明"}',
+    ].join('\n');
+}
+
+async function parseNaturalLanguageCondition(fields, ctxData, ruleId) {
+    const generator = getQuietPromptGenerator();
+    if (!generator) {
+        throw new Error('当前环境没有 generateQuietPrompt，无法调用 AI 解析');
+    }
+
+    const raw = await withTimeout(
+        Promise.resolve(generator({
+            quietPrompt: buildParsePrompt(fields, ctxData),
+            responseLength: 800,
+            skipWIAN: true,
+            removeReasoning: true,
+            trimToSentence: true,
+        })),
+        60000,
+        'AI 解析超时（60 秒）',
+    );
+
+    const parsed = extractJsonObject(raw);
+    const draft = createRule({
+        conditions: Array.isArray(parsed.conditions) ? parsed.conditions : [],
+        variables: Array.isArray(parsed.variables) ? parsed.variables : [],
+        match: parsed.match === 'any' ? 'any' : 'all',
+        nlCondition: fields.nlCondition,
+    });
+
+    if (!draft.conditions.length) {
+        throw new Error('AI 没有给出可用的条件');
+    }
+
+    const existingPaths = new Set(flattenVariables(ctxData.stat_data, { maxEntries: 500 }).map((row) => row.path));
+    // 已存在的变量也要保留：变量维护说明需要告诉 AI 什么时候更新它，
+    // 不能因为路径已经在 stat_data 里就把说明丢掉。
+    const variables = draft.variables.slice();
+
+    // 有些模型只给条件、不给变量；如果条件路径原本不存在，补一个布尔变量，
+    // 避免变量永远不出现。
+    for (const condition of draft.conditions) {
+        if (existingPaths.has(condition.path)) continue;
+        if (variables.some((variable) => variable.path === condition.path)) continue;
+        const value = String(condition.value ?? '').trim();
+        const numeric = ['>=', '>', '<=', '<'].includes(condition.op)
+            || (value !== '' && Number.isFinite(Number(value)));
+        const type = numeric ? 'number' : (value === 'true' || value === 'false' ? 'boolean' : 'string');
+        variables.push({
+            path: condition.path,
+            type,
+            initial: type === 'number' ? 0 : type === 'boolean' ? false : '',
+            description: draft.nlCondition || '当解锁条件达成时更新该变量',
+        });
+    }
+
+    return {
+        variables: normalizeVariables(variables),
+        conditions: draft.conditions,
+        match: draft.match,
+        explain: String(parsed.explain ?? '').trim(),
+        source: 'ai',
+    };
+}
+
+function renderParsedResult(parsed) {
+    const $box = $('#su-parse-result');
+    if (!parsed) {
+        $box.text('尚未解析。保存时会自动调用当前聊天模型解析一次；失败则自动创建布尔变量。');
+        return;
+    }
+
+    const variables = Array.isArray(parsed.variables) ? parsed.variables : [];
+    const conditions = Array.isArray(parsed.conditions) ? parsed.conditions : [];
+    const lines = [];
+    if (variables.length) {
+        lines.push(`变量：${variables.map((variable) => `${variable.path}（${variable.type}）`).join('、')}`);
+    } else {
+        lines.push('变量：复用当前已有的 MVU 变量');
+    }
+    lines.push(`条件：${conditions.map((condition) => {
+        const noValue = condition.op === 'exists' || condition.op === 'not_exists';
+        return `${condition.path} ${opLabel(condition.op)}${noValue ? '' : ` ${condition.value}`}`;
+    }).join('；') || '—'}`);
+    if (parsed.explain) lines.push(`说明：${parsed.explain}`);
+    $box.text(lines.join('\n'));
+}
+
+function setEditorBusy(busy, statusText = '') {
+    savingRule = Boolean(busy);
+    $('#su-parse').prop('disabled', Boolean(busy));
+    $('#su-editor-save').prop('disabled', Boolean(busy));
+    if (statusText) $('#su-parse-status').text(statusText).show();
+}
+
+async function parseEditorCondition() {
+    let fields;
+    try {
+        fields = readEditorFields();
+        if (!fields.nlCondition.trim()) throw new Error('请先填写自然语言解锁条件');
+    } catch (err) {
+        notify(String(err && err.message ? err.message : err), 'warning');
+        $('#su-nl-condition').trigger('focus');
+        return null;
+    }
+
+    setEditorBusy(true, 'AI 正在解析条件…');
+    try {
+        const parsed = await parseNaturalLanguageCondition(fields, buildContext(), editingRuleId || newRuleId());
+        editorConditions = parsed.conditions.map((condition) => ({ ...condition }));
+        editingVariables = parsed.variables;
+        editingParseSource = parsed.source;
+        editingNlParsed = fields.nlCondition.trim();
+        $('#su-match').val(parsed.match);
+        renderConditions();
+        renderParsedResult(parsed);
+        updateSummary();
+        $('#su-parse-status').text('已解析，可保存。').show();
+        return parsed;
+    } catch (err) {
+        const parsed = makeFallbackParse(editingRuleId || newRuleId(), fields.nlCondition);
+        editorConditions = parsed.conditions.map((condition) => ({ ...condition }));
+        editingVariables = parsed.variables;
+        editingParseSource = parsed.source;
+        editingNlParsed = fields.nlCondition.trim();
+        $('#su-match').val(parsed.match);
+        renderConditions();
+        renderParsedResult(parsed);
+        updateSummary();
+        const message = String(err && err.message ? err.message : err);
+        $('#su-parse-status').text(`AI 解析失败，已改用自动变量：${message}`).show();
+        notify(`AI 解析失败，已改用自动变量：${message}`, 'warning');
+        return parsed;
+    } finally {
+        setEditorBusy(false);
+    }
 }
 
 function buildDraftRule() {
@@ -753,13 +980,18 @@ function buildDraftRule() {
         ...fields,
         id: editingRuleId || 'draft',
         conditions,
+        variables: editingVariables,
+        parseSource: editingParseSource || undefined,
     });
 }
 
 function updateSummary() {
     try {
         const draft = buildDraftRule();
-        $('#su-condition-summary').text(conditionSummary(draft));
+        const parts = [];
+        if (draft.nlCondition) parts.push(`自然语言条件：${draft.nlCondition}`);
+        parts.push(conditionSummary(draft));
+        $('#su-condition-summary').text(parts.join('\n'));
     } catch {
         $('#su-condition-summary').text('—');
     }
@@ -783,6 +1015,8 @@ function readEditorRule() {
         ...fields,
         id: editingRuleId || undefined,
         conditions: rows.filter((row) => row.path),
+        variables: editingVariables,
+        parseSource: editingParseSource || undefined,
     });
 }
 
@@ -794,6 +1028,9 @@ function openEditor(ruleId) {
 
     const rule = ruleId ? currentRules.find((item) => item.id === ruleId) : null;
     editingRuleId = rule ? rule.id : null;
+    editingVariables = rule ? rule.variables.map((variable) => ({ ...variable })) : [];
+    editingParseSource = rule ? rule.parseSource : '';
+    editingNlParsed = rule && rule.nlCondition && rule.variables.length ? rule.nlCondition : '';
     editorConditions = rule
         ? rule.conditions.map((condition) => ({ ...condition }))
         : [{ path: '', op: '>=', value: '' }];
@@ -801,6 +1038,7 @@ function openEditor(ruleId) {
     $('#su-editor-title').text(rule ? '编辑解锁项' : '新建解锁项');
     $('#su-editor-delete').toggle(Boolean(rule));
     $('#su-title').val(rule && rule.title !== '未命名解锁项' ? rule.title : '');
+    $('#su-nl-condition').val(rule ? rule.nlCondition : '');
     $('#su-match').val(rule ? rule.match : 'all');
     $('#su-mode').val(rule ? rule.mode : 'sticky');
     $('#su-turns').val(rule ? rule.turns : 3);
@@ -811,6 +1049,16 @@ function openEditor(ruleId) {
     $('#su-rule-enabled').prop('checked', rule ? rule.enabled !== false : true);
 
     $('#su-test-result').hide().removeClass('is-pass is-fail').empty();
+    $('#su-parse-status').hide().text('');
+    if (rule && (rule.nlCondition || rule.variables.length)) {
+        renderParsedResult({
+            variables: rule.variables,
+            conditions: rule.conditions,
+            explain: rule.parseSource === 'auto' ? '这条规则使用自动布尔变量。' : '',
+        });
+    } else {
+        renderParsedResult(null);
+    }
     renderConditions();
     updateSummary();
     setTab('basic');
@@ -827,7 +1075,11 @@ function closeEditor() {
     $('#su-editor').hide();
     editingRuleId = null;
     editorConditions = [];
+    editingVariables = [];
+    editingParseSource = '';
+    editingNlParsed = '';
     lastPathField = null;
+    savingRule = false;
 }
 
 function showTextModal(title, text, subtitle = '只读') {
@@ -869,6 +1121,10 @@ function formatEvaluation(rule, evaluation) {
 function testEditorRule() {
     let draft;
     try {
+        const fields = readEditorFields();
+        if (fields.nlCondition && !collectConditionRows().some((condition) => condition.path)) {
+            throw new Error('请先点「AI 解析条件」，或直接保存让 AI 解析');
+        }
         draft = buildDraftRule();
     } catch (err) {
         notify(String(err && err.message ? err.message : err), 'error');
@@ -890,15 +1146,119 @@ function testEditorRule() {
     }
 }
 
-function saveEditorRule() {
-    let rule;
+async function resolveConditionsForSave(fields, existing, id) {
+    const rows = collectConditionRows().filter((condition) => condition.path);
+    const nl = fields.nlCondition.trim();
+
+    // 刚手动解析过、条件文本没变：直接复用解析结果，避免保存时又调用一次模型。
+    if (nl && nl === editingNlParsed && editorConditions.length) {
+        const parsedRowsChanged = JSON.stringify(rows) !== JSON.stringify(editorConditions);
+        return {
+            conditions: parsedRowsChanged && rows.length ? rows : editorConditions,
+            variables: editingVariables,
+            match: fields.match,
+            source: parsedRowsChanged ? 'manual' : (editingParseSource || 'ai'),
+        };
+    }
+
+    if (!nl) {
+        if (!rows.length) throw new Error('请填写自然语言解锁条件，或在高级里添加条件');
+        return {
+            conditions: rows,
+            variables: existing ? existing.variables : editingVariables,
+            match: fields.match,
+            source: existing ? existing.parseSource || 'manual' : 'manual',
+        };
+    }
+
+    const nlChanged = !existing || nl !== String(existing.nlCondition || '').trim();
+    const rowsChanged = existing
+        && JSON.stringify(rows) !== JSON.stringify(existing.conditions);
+    if (!nlChanged) {
+        return {
+            conditions: rowsChanged ? rows : (existing.conditions.length ? existing.conditions : rows),
+            variables: editingVariables.length ? editingVariables : existing.variables,
+            match: fields.match,
+            source: rowsChanged ? 'manual' : (editingParseSource || existing.parseSource || 'manual'),
+        };
+    }
+
+    setEditorBusy(true, 'AI 正在解析条件…');
     try {
-        rule = readEditorRule();
+        const parsed = await parseNaturalLanguageCondition(fields, buildContext(), id);
+        editorConditions = parsed.conditions.map((condition) => ({ ...condition }));
+        editingVariables = parsed.variables;
+        editingParseSource = parsed.source;
+        $('#su-match').val(parsed.match);
+        renderConditions();
+        renderParsedResult(parsed);
+        updateSummary();
+        $('#su-parse-status').text('已解析，正在保存…').show();
+        return {
+            conditions: parsed.conditions,
+            variables: parsed.variables,
+            match: parsed.match,
+            source: parsed.source,
+        };
+    } catch (err) {
+        const parsed = makeFallbackParse(id, nl);
+        editorConditions = parsed.conditions.map((condition) => ({ ...condition }));
+        editingVariables = parsed.variables;
+        editingParseSource = parsed.source;
+        $('#su-match').val(parsed.match);
+        renderConditions();
+        renderParsedResult(parsed);
+        updateSummary();
+        const message = String(err && err.message ? err.message : err);
+        $('#su-parse-status').text(`AI 解析失败，已改用自动变量：${message}`).show();
+        notify(`AI 解析失败，已改用自动变量：${message}`, 'warning');
+        return {
+            conditions: parsed.conditions,
+            variables: parsed.variables,
+            match: parsed.match,
+            source: parsed.source,
+        };
+    } finally {
+        setEditorBusy(false);
+    }
+}
+
+async function saveEditorRule() {
+    if (savingRule) return;
+
+    let fields;
+    try {
+        fields = readEditorFields();
+        if (!fields.content.trim()) throw new Error('请填写解锁后要注入的内容');
+        if (!fields.nlCondition.trim() && !collectConditionRows().some((condition) => condition.path)) {
+            throw new Error('请填写自然语言解锁条件');
+        }
     } catch (err) {
         notify(String(err && err.message ? err.message : err), 'error');
         setTab('basic');
         return;
     }
+
+    const id = editingRuleId || newRuleId();
+    const existing = editingRuleId ? currentRules.find((item) => item.id === editingRuleId) : null;
+
+    let resolved;
+    try {
+        resolved = await resolveConditionsForSave(fields, existing, id);
+    } catch (err) {
+        notify(String(err && err.message ? err.message : err), 'error');
+        return;
+    }
+
+    const rule = createRule({
+        ...fields,
+        id,
+        conditions: resolved.conditions,
+        variables: resolved.variables,
+        match: resolved.match,
+        parseSource: resolved.source,
+        parsedAt: resolved.source === 'manual' ? (existing ? existing.parsedAt : null) : Date.now(),
+    });
 
     const profile = ensureProfile(currentRoleKey);
     const rules = normalizeRules(profile.rules);
@@ -910,7 +1270,7 @@ function saveEditorRule() {
     profile.rules = rules;
     saveSettings();
     closeEditor();
-    notify('已保存解锁项', 'success');
+    notify(resolved.source === 'auto' ? '已保存（使用自动变量）' : '已保存解锁项', 'success');
     void refreshAll({ mvu: false });
 }
 
@@ -1095,9 +1455,11 @@ function previewInjection() {
         wrapper: settings.wrapper,
         header: settings.header,
     });
+    const variablePrompt = buildVariablePrompt(currentRules);
+    const promptText = [variablePrompt, plan.text].filter(Boolean).join('\n\n');
 
     const lines = [];
-    lines.push(plan.text || '（当前不会注入任何内容）');
+    lines.push(promptText || '（当前不会注入任何内容）');
     lines.push('');
     lines.push('—— 判定 ——');
     if (!plan.details.length) {
@@ -1331,6 +1693,11 @@ function bindPanelEvents() {
     $(document).on('click', '#su-editor-save', saveEditorRule);
     $(document).on('click', '#su-editor-delete', deleteEditorRule);
     $(document).on('click', '#su-editor-test', testEditorRule);
+    $(document).on('click', '#su-parse', parseEditorCondition);
+    $(document).on('input', '#su-nl-condition', () => {
+        $('#su-parse-status').text('条件已修改，保存时会重新解析。').show();
+        updateSummary();
+    });
     $(document).on('click', '#su-add-condition', addCondition);
     $(document).on('click', '#su-conditions .su-cond-remove', removeCondition);
     $(document).on('change', '#su-conditions .su-cond-op', function () {

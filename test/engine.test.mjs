@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
     ENGINE_VERSION,
     applyAutoUnlocks,
+    buildVariablePrompt,
     conditionSummary,
     createRule,
     describeRule,
@@ -298,6 +299,41 @@ test('条件摘要可读', () => {
     assert.match(summary, /任意满足/);
     assert.match(summary, /事件\.真相/);
     assert.match(summary, /≥/);
+});
+
+test('自然语言规则保留变量定义并去重', () => {
+    const r = rule({
+        nlCondition: '当 user 承认恢复记忆后',
+        parseSource: 'ai',
+        parsedAt: 123,
+        variables: [
+            { path: '剧情解锁.承认记忆', type: 'boolean', initial: false, description: '承认后设为 true' },
+            { path: '剧情解锁.承认记忆', type: 'string', initial: 'x' },
+            { path: '', type: 'boolean' },
+        ],
+    });
+    assert.equal(r.nlCondition, '当 user 承认恢复记忆后');
+    assert.equal(r.parseSource, 'ai');
+    assert.equal(r.parsedAt, 123);
+    assert.equal(createRule({ parsedAt: null }).parsedAt, null);
+    assert.equal(r.variables.length, 1);
+    assert.equal(r.variables[0].path, '剧情解锁.承认记忆');
+});
+
+test('变量维护提示只包含启用规则且可关闭', () => {
+    const rules = [
+        rule({
+            id: 'a',
+            variables: [{ path: '剧情解锁.a', type: 'boolean', initial: false, description: 'A 达成后为 true' }],
+        }),
+        rule({ id: 'b', enabled: false, variables: [{ path: '剧情解锁.b', type: 'boolean', initial: false }] }),
+    ];
+    const text = buildVariablePrompt(rules);
+    assert.match(text, /<story_unlock_variables>/);
+    assert.ok(text.includes('剧情解锁.a'));
+    assert.match(text, /A 达成后为 true/);
+    assert.ok(!text.includes('剧情解锁.b'));
+    assert.equal(buildVariablePrompt([]), '');
 });
 
 test('状态归一化容忍脏数据', () => {

@@ -6,10 +6,10 @@
                 <span class="su-title">
                     <i class="fa-solid fa-lock-open"></i>
                     剧情解锁
-                    <span class="su-version">v0.1.1</span>
+                    <span class="su-version">v0.2.0</span>
                 </span>
                 <span class="su-subtitle">
-                    MVU 剧情变量满足条件后，才把预设内容注入给 AI。规则随角色卡保存，解锁状态随聊天保存，互不串味。
+                    用自然语言写解锁条件，保存时 AI 自动转成 MVU 变量；满足后才把预设内容注入给 AI。规则随角色卡保存，解锁状态随聊天保存。
                 </span>
             </span>
             <span class="su-chevron" aria-hidden="true"></span>
@@ -116,40 +116,82 @@
         <div class="su-dialog-head">
             <div>
                 <div class="su-dialog-title" id="su-editor-title">新建解锁项</div>
-                <div class="su-dialog-sub">条件满足后才会注入；支持 MVU 路径、运算符和高级表达式。</div>
+                <div class="su-dialog-sub">写一句自然语言条件即可；保存时 AI 会解析成 MVU 变量，平时不用管路径。</div>
             </div>
             <button class="menu_button" id="su-editor-close" title="关闭">✕</button>
         </div>
 
         <div class="su-tabs">
-            <button class="su-tab is-active" data-tab="basic">基本</button>
-            <button class="su-tab" data-tab="conditions">条件</button>
-            <button class="su-tab" data-tab="advanced">高级</button>
+            <button class="su-tab is-active" data-tab="basic">简单</button>
+            <button class="su-tab" data-tab="advanced">高级（一般不用改）</button>
         </div>
 
         <div class="su-tab-panel is-active" data-panel="basic">
-            <div class="su-grid-2">
-                <label class="su-field">
-                    <span>名称</span>
-                    <input id="su-title" type="text" maxlength="60" placeholder="例如：恢复失忆前的记忆">
-                </label>
+            <label class="su-field">
+                <span>名称</span>
+                <input id="su-title" type="text" maxlength="60" placeholder="例如：恢复失忆前的记忆">
+            </label>
+
+            <label class="su-field">
+                <span>解锁条件（用自然语言写）</span>
+                <textarea id="su-nl-condition" rows="4" placeholder="例如：当 user 在钟楼承认自己恢复记忆后。&#10;不用写变量路径，AI 会自己找或新建变量。"></textarea>
+            </label>
+            <div class="su-parse-row">
+                <button type="button" id="su-parse" class="menu_button">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i> AI 解析条件
+                </button>
+                <span id="su-parse-status" class="su-parse-status" style="display:none;"></span>
+            </div>
+            <div class="su-hint">
+                保存时会自动解析一次。AI 会优先复用已有 MVU 变量；没有合适的变量时，在
+                <code>剧情解锁.</code> 下新建。解析失败会自动建一个布尔变量，仍然能保存。
+            </div>
+
+            <label class="su-field">
+                <span>解锁后注入的内容</span>
+                <textarea id="su-content" rows="6" placeholder="例如：你其实记得失忆前的事：你曾是……&#10;&#10;这段内容只有在条件满足后才会发给 AI。"></textarea>
+            </label>
+
+            <label class="su-field">
+                <span>解锁后怎么注入</span>
+                <select id="su-mode">
+                    <option value="sticky">解锁后一直注入（适合恢复记忆/揭示设定）</option>
+                    <option value="once">只注入一次</option>
+                    <option value="window">解锁后限时注入（在高级里设楼层数）</option>
+                    <option value="while">条件满足期间注入</option>
+                </select>
+            </label>
+
+            <label class="su-check">
+                <input type="checkbox" id="su-rule-enabled" checked>
+                <span>启用这条解锁项</span>
+            </label>
+        </div>
+
+        <div class="su-tab-panel" data-panel="advanced">
+            <div class="su-parse-box">
+                <div class="su-summary-label">AI 解析结果</div>
+                <div id="su-parse-result" class="su-parse-result">尚未解析。保存时会自动调用当前聊天模型解析一次；失败则自动创建布尔变量。</div>
+            </div>
+
+            <div class="su-summary-box">
+                <div class="su-summary-label">自动解析出的条件（可手动微调）</div>
+                <div id="su-conditions" class="su-conditions"></div>
+                <button id="su-add-condition" class="menu_button">
+                    <i class="fa-solid fa-plus"></i> 添加条件
+                </button>
+            </div>
+            <div class="su-hint">
+                路径从 MVU 的 <code>stat_data</code> 开始，例如 <code>角色.络络.好感度</code> 或
+                <code>剧情解锁.承认失忆</code>。数字、布尔会自动比较；也支持 <code>$floor</code> 当前楼层。
+            </div>
+
+            <div class="su-grid-3">
                 <label class="su-field">
                     <span>满足方式</span>
                     <select id="su-match">
                         <option value="all">全部条件满足（AND）</option>
                         <option value="any">任意条件满足（OR）</option>
-                    </select>
-                </label>
-            </div>
-
-            <div class="su-grid-3">
-                <label class="su-field">
-                    <span>注入方式</span>
-                    <select id="su-mode">
-                        <option value="sticky">解锁后一直注入</option>
-                        <option value="once">只注入一次</option>
-                        <option value="window">解锁后限时注入</option>
-                        <option value="while">条件满足期间注入</option>
                     </select>
                 </label>
                 <label class="su-field">
@@ -162,29 +204,6 @@
                 </label>
             </div>
 
-            <label class="su-field">
-                <span>解锁后注入的内容</span>
-                <textarea id="su-content" rows="7" placeholder="例如：你其实记得失忆前的事：你曾是……&#10;&#10;这段内容只有在条件满足后才会发给 AI。"></textarea>
-            </label>
-
-            <label class="su-check">
-                <input type="checkbox" id="su-rule-enabled" checked>
-                <span>启用这条解锁项</span>
-            </label>
-        </div>
-
-        <div class="su-tab-panel" data-panel="conditions">
-            <div id="su-conditions" class="su-conditions"></div>
-            <button id="su-add-condition" class="menu_button">
-                <i class="fa-solid fa-plus"></i> 添加条件
-            </button>
-            <div class="su-hint">
-                路径从 MVU 的 <code>stat_data</code> 开始，例如 <code>角色.络络.好感度</code> 或
-                <code>事件.失忆真相</code>。数字、布尔会自动比较；也支持 <code>$floor</code> 当前楼层。
-            </div>
-        </div>
-
-        <div class="su-tab-panel" data-panel="advanced">
             <label class="su-field">
                 <span>高级表达式（可选，和上面的条件是 AND）</span>
                 <textarea id="su-expr" rows="3" placeholder="例如：get('角色.络络.好感度') >= 60 && get('事件.失忆真相') === true"></textarea>

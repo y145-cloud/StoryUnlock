@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "Story Unlock",
-    "version": "0.1.1",
+    "version": "0.2.0",
     "homePage": "",
-    "description": "当 MVU 剧情变量满足条件时，才把预设提示词注入给 AI。规则随角色卡，解锁状态随聊天，不使用世界书。适配 SillyTavern 与 TauriTavern。"
+    "description": "用自然语言写剧情解锁条件，保存时 AI 自动转成 MVU 变量；条件达成后才注入预设内容。规则随角色卡，解锁状态随聊天，不使用世界书。适配 SillyTavern 与 TauriTavern。"
 }
