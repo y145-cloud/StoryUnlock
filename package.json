@@ -1,6 +1,6 @@
 {
     "name": "story-unlock",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "private": true,
     "type": "module",
     "description": "剧情解锁 Story Unlock：用自然语言解锁条件，AI 自动生成/维护 MVU 变量的 SillyTavern / TauriTavern 扩展",

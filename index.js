@@ -2,8 +2,10 @@
  * 剧情解锁 Story Unlock — SillyTavern / TauriTavern 前端扩展
  *
  * 设计要点：
- *   - 规则按角色卡保存（extension_settings），解锁状态按聊天保存（chat_metadata）。
- *     因此同一张卡开多个聊天时，条件内容不会互相串。
+ *   - 规则和解锁状态都按聊天保存（chat_metadata）。
+ *     因此同一张卡开多个聊天时，解锁项、条件和解锁进度都互不影响。
+ *   - 旧版角色卡级规则会在老聊天首次打开时自动迁移一份到该聊天；
+ *     新聊天默认从空白开始，不继承旧规则。
  *   - 不写世界书，不依赖世界书条目。
  *   - 生成前（GENERATION_AFTER_COMMANDS）根据 MVU 变量计算，只注入已解锁的内容。
  */
@@ -51,6 +53,7 @@ import {
 const $ = globalThis.jQuery || globalThis.$;
 
 const MODULE = 'story_unlock';
+const CHAT_RULES_KEY = 'story_unlock_rules';
 const PROMPT_KEY = 'story_unlock_injection';
 const SETTINGS_HTML_URL = 'scripts/extensions/third-party/StoryUnlock/settings.html';
 const DEFAULT_HEADER = '以下设定已随剧情解锁，从现在起视为既定事实；不要在回复中复述本说明。';
@@ -129,28 +132,61 @@ function saveSettings() {
     }
 }
 
-function ensureProfile(roleKey) {
-    const settings = ensureSettings();
-    if (!settings.profiles[roleKey] || typeof settings.profiles[roleKey] !== 'object') {
-        settings.profiles[roleKey] = { rules: [] };
+function persistChatMetadata(ctx) {
+    try {
+        saveMetadataDebounced();
+    } catch (err) {
+        try {
+            if (ctx && typeof ctx.saveMetadataDebounced === 'function') ctx.saveMetadataDebounced();
+        } catch (inner) {
+            console.warn('[StoryUnlock] 保存聊天元数据失败', inner);
+        }
     }
-    const profile = settings.profiles[roleKey];
-    if (!Array.isArray(profile.rules)) profile.rules = [];
-    return profile;
 }
 
-function getRules(roleKey) {
+function getLegacyRules(roleKey) {
     if (!roleKey) return [];
-    const profile = ensureProfile(roleKey);
-    const normalized = normalizeRules(profile.rules);
-    const changed = normalized.length !== profile.rules.length
-        || normalized.some((rule, index) => !profile.rules[index] || rule.id !== profile.rules[index].id);
+    const settings = ensureSettings();
+    const profile = settings.profiles[roleKey];
+    if (!profile || !Array.isArray(profile.rules)) return [];
+    return normalizeRules(profile.rules);
+}
+
+/**
+ * 规则只存在当前聊天的 chat_metadata 里。
+ * 老版本把规则存在 extension_settings.profiles[roleKey]，这里做一次性迁移：
+ * 只有“已经有 user 消息的老聊天”才继承旧规则；新聊天保持空白。
+ */
+function getRules(roleKey) {
+    const ctx = getContextSafe();
+    if (!ctx || !ctx.chatMetadata || typeof ctx.chatMetadata !== 'object') return [];
+
+    const meta = ctx.chatMetadata;
+    if (!Array.isArray(meta[CHAT_RULES_KEY])) {
+        const legacy = getLegacyRules(roleKey || getRoleKey(ctx));
+        const hasUserMessage = Array.isArray(ctx.chat) && ctx.chat.some((message) => message && message.is_user);
+        meta[CHAT_RULES_KEY] = hasUserMessage ? legacy : [];
+        persistChatMetadata(ctx);
+    }
+
+    const raw = meta[CHAT_RULES_KEY];
+    const normalized = normalizeRules(raw);
+    const changed = normalized.length !== raw.length
+        || normalized.some((rule, index) => !raw[index] || rule.id !== raw[index].id);
 
     if (changed) {
-        profile.rules = normalized;
-        saveSettings();
+        meta[CHAT_RULES_KEY] = normalized;
+        persistChatMetadata(ctx);
     }
     return normalized;
+}
+
+function saveChatRules(rules) {
+    const ctx = getContextSafe();
+    if (!ctx || !ctx.chatMetadata || typeof ctx.chatMetadata !== 'object') return false;
+    ctx.chatMetadata[CHAT_RULES_KEY] = normalizeRules(rules);
+    persistChatMetadata(ctx);
+    return true;
 }
 
 function getContextSafe() {
@@ -573,7 +609,7 @@ function renderRules(ctxData = currentCtx) {
     $('#su-rule-count').text(currentRules.length);
 
     if (!currentRoleKey) {
-        $empty.text('先打开一个角色聊天。规则会按角色卡保存，解锁状态按聊天保存。').show();
+        $empty.text('先打开一个角色聊天。规则和解锁状态都保存在当前聊天里。').show();
         return;
     }
 
@@ -1260,15 +1296,13 @@ async function saveEditorRule() {
         parsedAt: resolved.source === 'manual' ? (existing ? existing.parsedAt : null) : Date.now(),
     });
 
-    const profile = ensureProfile(currentRoleKey);
-    const rules = normalizeRules(profile.rules);
+    const rules = getRules(currentRoleKey);
     const index = editingRuleId ? rules.findIndex((item) => item.id === editingRuleId) : -1;
 
     if (index >= 0) rules[index] = rule;
     else rules.push(rule);
 
-    profile.rules = rules;
-    saveSettings();
+    saveChatRules(rules);
     closeEditor();
     notify(resolved.source === 'auto' ? '已保存（使用自动变量）' : '已保存解锁项', 'success');
     void refreshAll({ mvu: false });
@@ -1278,9 +1312,8 @@ function deleteEditorRule() {
     if (!editingRuleId) return;
     if (!globalThis.confirm('确定删除这条解锁项？同聊天的解锁记录会保留，但不再注入。')) return;
 
-    const profile = ensureProfile(currentRoleKey);
-    profile.rules = normalizeRules(profile.rules).filter((rule) => rule.id !== editingRuleId);
-    saveSettings();
+    const rules = getRules(currentRoleKey).filter((rule) => rule.id !== editingRuleId);
+    saveChatRules(rules);
     closeEditor();
     notify('已删除解锁项', 'info');
     void refreshAll({ mvu: false });
@@ -1310,13 +1343,11 @@ function onRuleAction(action, ruleId) {
     }
 
     if (action === 'toggle') {
-        const profile = ensureProfile(currentRoleKey);
-        const rules = normalizeRules(profile.rules);
+        const rules = getRules(currentRoleKey);
         const target = rules.find((item) => item.id === ruleId);
         if (!target) return;
         target.enabled = target.enabled === false;
-        profile.rules = rules;
-        saveSettings();
+        saveChatRules(rules);
         applyPrompt('');
         notify(target.enabled ? '已启用' : '已停用', 'info');
         void refreshAll({ mvu: false });
@@ -1385,6 +1416,7 @@ function exportRules() {
         format: 'story-unlock',
         version: 1,
         roleKey: currentRoleKey,
+        chatId: String((currentCtx && currentCtx.ctx && currentCtx.ctx.chatId) || ''),
         roleName: describeRole(currentCtx ? currentCtx.ctx : getContextSafe()),
         exportedAt: new Date().toISOString(),
         rules: getRules(currentRoleKey),
@@ -1423,10 +1455,9 @@ async function importRules(file) {
         const imported = normalizeRules(list);
         if (!imported.length) throw new Error('没有可导入的规则');
 
-        if (!globalThis.confirm(`追加导入 ${imported.length} 条规则到当前角色卡？不会覆盖已有规则。`)) return;
+        if (!globalThis.confirm(`追加导入 ${imported.length} 条规则到当前聊天？不会覆盖已有规则。`)) return;
 
-        const profile = ensureProfile(currentRoleKey);
-        const existing = normalizeRules(profile.rules);
+        const existing = getRules(currentRoleKey);
         const ids = new Set(existing.map((rule) => rule.id));
 
         for (const rule of imported) {
@@ -1434,8 +1465,7 @@ async function importRules(file) {
             ids.add(rule.id);
         }
 
-        profile.rules = [...existing, ...imported];
-        saveSettings();
+        saveChatRules([...existing, ...imported]);
         notify(`已导入 ${imported.length} 条规则`, 'success');
         void refreshAll({ mvu: false });
     } catch (err) {
@@ -1513,7 +1543,8 @@ function slashStatus() {
 
     const rules = getRules(roleKey);
     const state = getChatState();
-    const lines = [`角色：${describeRole(ctxData.ctx) || roleKey}`, `楼层：${ctxData.floor}`, `规则：${rules.length} 条`];
+    const chatLabel = String(ctxData.ctx.chatId || '当前聊天');
+    const lines = [`角色：${describeRole(ctxData.ctx) || roleKey}`, `聊天：${chatLabel}`, `楼层：${ctxData.floor}`, `规则：${rules.length} 条`];
 
     for (const rule of rules) {
         const description = describeRule(rule, state, ctxData);
@@ -1526,7 +1557,7 @@ function slashStatus() {
 function slashTest() {
     const ctxData = buildContext();
     const rules = getRules(getRoleKey(ctxData.ctx));
-    if (!rules.length) return '当前角色没有解锁项。';
+    if (!rules.length) return '当前聊天没有解锁项。';
 
     return rules.map((rule) => {
         const evaluation = evaluateRule(rule, ctxData);
@@ -1572,7 +1603,7 @@ async function registerSlashCommands() {
                 const rules = getRules(getRoleKey(getContextSafe() || {}));
                 return rules.length
                     ? rules.map((rule, index) => `${index + 1}. ${rule.title} [${rule.mode}]`).join('\n')
-                    : '当前角色没有解锁项。';
+                    : '当前聊天没有解锁项。';
             }
             if (command === 'preview') {
                 const ctxData = buildContext();
